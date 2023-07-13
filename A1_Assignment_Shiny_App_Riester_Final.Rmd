@@ -1,0 +1,311 @@
+---
+title: "Sales Forecast and Analysis"
+author: "Kilian Riester / Hult International Business School"
+date: '2023-JULY-13'
+output: html_document
+runtime: shiny
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, echo = FALSE, warning=FALSE, message=FALSE}
+
+library(shiny)
+library(forecast)
+library(tidyverse)
+library(scales)
+library(ggplot2)
+library(scales)
+library(plotly)
+
+fsales <- "https://raw.githubusercontent.com/multidis/hult-inter-bus-reports-r/main/forecasting/sales_weekly.csv"
+sales <- read_csv(fsales)
+```
+
+
+```{r, echo = FALSE}
+# Shiny App
+ui <- fluidPage(
+  titlePanel("Variables"),
+  sidebarLayout(
+    sidebarPanel(
+      selectInput("store", "Store Number:", sort(unique(sales$Store))),
+      conditionalPanel(
+        condition = "input.tabs == 'Week'",
+        numericInput("week", "Week:", min = min(sales$Week), max = max(sales$Week), 
+               value = max(sales$Week), step = 1)
+        ),
+      conditionalPanel(
+   condition = "input.tabs == 'Quarter'",
+  ),
+  conditionalPanel(
+    condition = "input.tabs == 'ThreeMonths'"
+    ),
+  conditionalPanel(
+    condition = "input.tabs == 'Intervals'",
+    checkboxInput("ci", "Include Confidence Intervals", FALSE)
+    ),
+  conditionalPanel(
+    condition = "input.tabs == 'Comparison'",
+    sliderInput("horizon", label = "Forecast horizon (weeks): ",
+                min = 2, max = 52, value = 8, step = 1),
+    )
+  ),
+    mainPanel(
+      tabsetPanel(type = "tabs", id = "tabs",
+                  tabPanel("Week Performance Indicator", plotOutput("weekPlot"), value = "Week"),
+                  tabPanel("Upcoming Quarter Forecast", plotOutput("quarterPlot"), value = "Quarter"),
+                  tabPanel("Weekly Sales Forecast (Next Three Months)", plotlyOutput("tmPlot"), value =
+                             "ThreeMonths"),
+                  tabPanel("Next Month Forecast (showing last Quarter of actual data)",
+                           plotOutput("ciPlot"), value = "Intervals"),
+                  tabPanel("Last Year to One Year Forecast Monthly Comparison", plotOutput("monthPlot"),
+                           value = "Comparison")
+      )
+
+      )
+    )
+  )
+
+```
+
+```{r, echo = FALSE}
+server <- function(input, output, session) {
+  sales <- read_csv("https://raw.githubusercontent.com/multidis/hult-inter-bus-reports-r/main/forecasting/sales_weekly.csv")
+  
+  # Reactive expressions for inputs
+  selectedStore <- reactive({
+    req(input$store)
+    input$store
+  })
+  selectedWeek <- reactive({
+    req(input$week)
+    input$week
+  })
+  selectedQuarter <- reactive({
+    req(input$quarter)
+    input$quarter
+  })
+  includeCI <- reactive({
+    req(input$ci)
+    input$ci
+  })
+  includeCIMonth <- reactive({
+  req(input$ci_month)
+  input$ci_month
+  })
+  
+
+# OUTPUTS: Plots & Calculations
+
+  
+  
+  
+  
+# WEEK performance indicator forecast vs. actual (1. Requirement)
+  
+output$weekPlot <- renderPlot({
+# Generate the historical sales data up to the selected week
+sales_historical <- sales[sales$Store == selectedStore(), ]
+
+
+# create a time series object
+sales_ts <- ts(sales_historical$Weekly_Sales, frequency = 52) 
+
+# create an ARIMA model
+model <- auto.arima(sales_ts)
+
+# forecast the next week
+forecast_sales <- forecast(model, h = 1) # h is the forecast horizon; set to 1 for next week
+
+# extract the actual sales for the last week of the historical data
+actual_sales <- sales$Weekly_Sales[sales$Week == selectedWeek() & sales$Store == selectedStore()]
+
+
+# prepare data for plotting
+sales_plot_data <- data.frame(
+  Type = c("Actual", "Forecasted"),
+  Sales = c(actual_sales, forecast_sales$mean)
+)
+
+# plot actual vs forecasted sales
+ggplot(sales_plot_data, aes(x = Type, y = Sales, fill = Type)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(x = "Type", y = "Sales", fill = "Type", title = "Actual vs Forecasted Sales per Week and Store") +
+  theme_minimal()
+
+  })
+
+
+
+
+
+
+#QUARTER Sales forecast for the first Quarter in the upcoming year (2. Requirement)
+
+output$quarterPlot <- renderPlot({
+  
+  # Calculate quarterly sales for each store based on weekly sales data
+
+  sales_qrt <- sales %>%
+    mutate(Quarter = ceiling(Week / 13)) %>%
+    group_by(Store, Quarter) %>%
+    summarise(Quarterly_Sales = sum(Weekly_Sales))
+    
+  # Filter by selected store
+  sales_qrt_filtered <- sales_qrt %>%
+    filter(Store == selectedStore())
+  
+  # Create a time series object
+  sales_qrt_ts <- ts(sales_qrt_filtered$Quarterly_Sales, frequency = 1)
+  
+  # Build ARIMA model and forecast
+  arima_model <- auto.arima(sales_qrt_ts, seasonal.test = "seas")
+  arima_pred <- forecast(arima_model, h = 4)  # Adjust horizon to forecast a year (4 quarters)
+  
+  # Plot actual and forecasted values
+  ggplot() +
+    geom_line(data = sales_qrt_filtered, aes(x = Quarter, y = Quarterly_Sales, color = "Actual")) +
+    geom_line(aes(x = c(tail(sales_qrt_filtered$Quarter, n = 1), tail(sales_qrt_filtered$Quarter, n = 1) + 1:4),
+                  y = c(tail(sales_qrt_filtered$Quarterly_Sales, n = 1), as.numeric(arima_pred$mean)),
+                  color = "Forecast")) +
+    labs(title = "4 Quarter Sales Forecast and Actual Sales for Selected Store",
+         x = "Quarter",
+         y = "Sales",
+         color = "Legend") +
+    theme_minimal() +
+    scale_y_continuous(labels = comma)
+})
+
+
+
+
+
+
+
+# WEEKLY FORECAST FOR THE NEXT THREE MONTHS (3. Requirement)
+
+output$tmPlot <- renderPlotly({
+
+  nweek_now <- max(sales$Week)
+  horiz <- 12  # Set horizon to 12 weeks for 3-month forecast
+  
+  # Getting the last 12 weeks of sales data
+  last_12_weeks_sales <- sales %>%
+    filter(Store == selectedStore(), Week > (nweek_now - 12))
+  
+  sales_ts <- ts(sales %>% filter(Store == selectedStore()) %>%
+                   select(Weekly_Sales), frequency = 52)
+  arima_model <- auto.arima(sales_ts, seasonal.test = "seas")
+  arima_pred <- forecast(arima_model, h = horiz)
+  
+  sales_pred <- data.frame(Sales_Predicted = as.numeric(arima_pred$mean),
+                           Week = (nweek_now + 1):(nweek_now + horiz)) # Forecast data for the next 12 weeks
+  
+  p <- ggplot() +
+      geom_line(data = last_12_weeks_sales, aes(Week, Weekly_Sales), color = "blue") +
+      geom_line(data = sales_pred, aes(Week, Sales_Predicted), color = "red") +
+      labs(x = "Weeks ahead", y = "Weekly Sales Forecast", color = "Legend",
+           title = "Forecast for the Next Three Months and Actual Sales of the last Quarter") +
+      scale_color_manual(values = c("blue", "red"),
+                         labels = c("Actual", "Forecast")) +
+      theme_minimal()
+  
+  ggplotly(p, tooltip = "y")  # Convert to plotly and set tooltips to display y values
+})
+
+
+
+
+
+
+# CONFIDENCE INTERVALS FOR NEXT MONTH PREDICTED SALES (4. Requirement)
+output$ciPlot <- renderPlot({
+
+  # Getting the last quarter (13 weeks) of sales data and the forecast for the next 4 weeks
+  sales_filtered <- sales_filtered <- sales[sales$Store == selectedStore() & 
+                                              sales$Week >= (142 - 13) & sales$Week <= 142, ]
+
+  sales_ts <- ts(sales_filtered$Weekly_Sales, frequency = 52)
+  
+  arima_model <- auto.arima(sales_ts, seasonal.test = "seas")
+  
+  arima_pred <- forecast(arima_model, h = 4)  # Adjust horizon to forecast next 4 weeks
+  
+  # Prepare data for plotting
+  sales_pred <- data.frame(Week = 143:146,
+                           Sales_Predicted = as.numeric(arima_pred$mean),
+                           Lower_CI = as.numeric(arima_pred$lower[,2]),
+                           Upper_CI = as.numeric(arima_pred$upper[,2]))
+  
+  # Combine actual and forecasted data
+  combined_data <- rbind(sales_filtered %>% select(Week, Sales = Weekly_Sales) %>% mutate(Type = "Actual"),
+                         sales_pred %>% select(Week, Sales = Sales_Predicted) %>% mutate(Type = "Forecast"))
+  
+
+
+p <- ggplot() +
+        geom_line(data = combined_data, aes(x = Week, y = Sales, color = Type)) +
+        labs(x = "Weeks ahead", y = "Sales", color = "Legend",
+             title = "Actual and Forecasted Sales with Confidence Intervals per Store") +
+        theme_minimal()
+
+  if(input$ci) {
+    p <- p + geom_ribbon(data = sales_pred, aes(x = Week, ymin = Lower_CI, ymax = Upper_CI),
+                         fill = "grey80", alpha = 0.5)
+  }
+
+  print(p)
+
+
+})
+
+
+
+
+
+
+
+
+
+# FORECAST NEXT 52 WEEKS AND ACTUAL SALES DATA LAST 52 WEEKS (5. Requirement)
+  
+output$monthPlot <- renderPlot({
+
+  nweek_now <- max(sales$Week)
+
+  horiz <-  input$horizon
+
+  # Getting the last 52 weeks of sales data
+  last_52_weeks_sales <- sales %>%
+    filter(Store == selectedStore(), Week > (nweek_now - 52))
+  
+  sales_ts <- ts(sales %>% filter(Store == selectedStore()) %>%
+                   select(Weekly_Sales), frequency = 52)
+  arima_model <- auto.arima(sales_ts, seasonal.test = "seas")
+  arima_pred <- forecast(arima_model, h = horiz)
+  
+  sales_pred <- data.frame(Sales_Predicted = as.numeric(arima_pred$mean),
+                           Week = (nweek_now + 1 - 52):(nweek_now + horiz - 52)) # Shifting the weeks for forecasted data by subtracting 52
+  
+  p <-  ggplot() +
+      geom_line(data = last_52_weeks_sales, aes(Week, Weekly_Sales), color = "blue") +
+      geom_line(data = sales_pred, aes(Week, Sales_Predicted), color = "red") +
+      labs(x = "Weeks ahead", y = "Weekly Sales Forecast", color = "Legend",
+           title = "Comparison of Forecast for next 52 weeks and Actual Sales for the Last 52 Weeks") +
+      scale_color_manual(values = c("blue", "red"),
+                         labels = c("Actual", "Forecast")) +
+      theme_minimal()
+    
+  print(p)
+  
+})
+
+
+
+}
+
+shinyApp(ui, server)
+```
